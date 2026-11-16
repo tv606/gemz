@@ -122,8 +122,9 @@ function gemSVG(t, s) {
 }
 
 const boardEl = document.getElementById('board'), wrapEl = document.getElementById('wrap');
-let grid = [], busy = false, score = 0, level = 1, levelStart = 0, combo = 0, sel = null, best = 0, muted = false;
-try { best = +localStorage.getItem('mucevher-best') || 0; muted = localStorage.getItem('mucevher-mute') === '1'; } catch (e) {}
+let grid = [], busy = false, score = 0, level = 1, levelStart = 0, combo = 0, sel = null, best = 0, soundMode = 0; // 0 all, 1 no voice, 2 mute
+try { best = +localStorage.getItem('mucevher-best') || 0; soundMode = +localStorage.getItem('mucevher-sound') || 0; } catch (e) {}
+let muted = soundMode === 2;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const rand = n => Math.floor(Math.random() * n);
@@ -162,77 +163,109 @@ try { new ResizeObserver(() => {
 window.addEventListener('orientationchange', () => setTimeout(layout, 200));
 
 // ---------- Sound ----------
-// Soft bell / glass tones: sine partials, gentle attack, low-pass, light echo.
-let ac = null, bus = null;
+// Arcade gem-game style sound kit, synthesised with Web Audio (no sound files).
+let ac = null, bus = null, noiseBuf = null;
 function audio() {
   if (muted) return null;
   try {
     if (!ac) {
       ac = new (window.AudioContext || window.webkitAudioContext)();
-      const master = ac.createGain(); master.gain.value = .55;
-      const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 4200;
-      const comp = ac.createDynamicsCompressor();
-      const delay = ac.createDelay(); delay.delayTime.value = .16;
-      const fb = ac.createGain(); fb.gain.value = .28;
-      const wet = ac.createGain(); wet.gain.value = .22;
-      const dlp = ac.createBiquadFilter(); dlp.type = 'lowpass'; dlp.frequency.value = 2200;
-      master.connect(lp); lp.connect(comp); comp.connect(ac.destination);
-      lp.connect(delay); delay.connect(dlp); dlp.connect(fb); fb.connect(delay); dlp.connect(wet); wet.connect(comp);
+      const master = ac.createGain(); master.gain.value = .7;
+      const comp = ac.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 4;
+      const delay = ac.createDelay(); delay.delayTime.value = .09;
+      const fb = ac.createGain(); fb.gain.value = .22;
+      const wet = ac.createGain(); wet.gain.value = .14;
+      const dlp = ac.createBiquadFilter(); dlp.type = 'lowpass'; dlp.frequency.value = 5000;
+      master.connect(comp); comp.connect(ac.destination);
+      master.connect(delay); delay.connect(dlp); dlp.connect(fb); fb.connect(delay); dlp.connect(wet); wet.connect(comp);
       bus = master;
+      const len = ac.sampleRate * 1.5; noiseBuf = ac.createBuffer(1, len, ac.sampleRate);
+      const ch = noiseBuf.getChannelData(0); for (let i = 0; i < len; i++) ch[i] = Math.random() * 2 - 1;
     }
     if (ac.state === 'suspended') ac.resume();
     return ac;
   } catch (e) { return null; }
 }
-const BELL = [[1, 1], [2, .28], [3, .1], [4.2, .05]];
-const SOFT = [[1, 1], [2, .12]];
-function tone(freq, { at = 0, dur = .5, vol = .12, attack = .008, partials = BELL, glide = 1 } = {}) {
+// FM "struck metal / crystal" tone: bright inharmonic attack that settles into a clean ring.
+function clink(freq, { at = 0, dur = .45, vol = .16, ratio = 3.51, index = 2.2 } = {}) {
   const a = audio(); if (!a) return;
   const t = a.currentTime + at;
-  for (const [mul, amp] of partials) {
-    const o = a.createOscillator(), g = a.createGain();
-    o.type = 'sine';
-    o.frequency.setValueAtTime(freq * mul, t);
-    if (glide !== 1) o.frequency.exponentialRampToValueAtTime(freq * mul * glide, t + dur * .6);
-    const d = dur / Math.sqrt(mul);          // higher partials fade faster, like a real bell
-    g.gain.setValueAtTime(0, t);
-    g.gain.linearRampToValueAtTime(vol * amp, t + attack);
-    g.gain.exponentialRampToValueAtTime(.0001, t + d);
-    o.connect(g); g.connect(bus); o.start(t); o.stop(t + d + .05);
-  }
+  const car = a.createOscillator(), mod = a.createOscillator(), mg = a.createGain(), g = a.createGain();
+  car.frequency.value = freq; mod.frequency.value = freq * ratio;
+  mg.gain.setValueAtTime(freq * index, t); mg.gain.exponentialRampToValueAtTime(freq * .02, t + dur * .35);
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + .002); g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+  mod.connect(mg); mg.connect(car.frequency); car.connect(g); g.connect(bus);
+  car.start(t); mod.start(t); car.stop(t + dur + .05); mod.stop(t + dur + .05);
 }
-function whoosh(at = 0, dur = .35, vol = .1, from = 1800, to = 300) {
+function sine(freq, { at = 0, dur = .3, vol = .1, to = null, type = 'sine', attack = .003 } = {}) {
   const a = audio(); if (!a) return;
-  const t = a.currentTime + at, len = Math.floor(a.sampleRate * dur);
-  const buf = a.createBuffer(1, len, a.sampleRate), ch = buf.getChannelData(0);
-  for (let i = 0; i < len; i++) ch[i] = Math.random() * 2 - 1;
-  const src = a.createBufferSource(); src.buffer = buf;
-  const f = a.createBiquadFilter(); f.type = 'bandpass'; f.Q.value = 1.2;
-  f.frequency.setValueAtTime(from, t); f.frequency.exponentialRampToValueAtTime(to, t + dur);
-  const g = a.createGain();
-  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + dur * .25); g.gain.exponentialRampToValueAtTime(.0001, t + dur);
-  src.connect(f); f.connect(g); g.connect(bus); src.start(t); src.stop(t + dur);
+  const t = a.currentTime + at, o = a.createOscillator(), g = a.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, t);
+  if (to) o.frequency.exponentialRampToValueAtTime(to, t + dur);
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + attack); g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+  o.connect(g); g.connect(bus); o.start(t); o.stop(t + dur + .05);
 }
-// Major pentatonic, so any sequence of match notes sounds pleasant.
-const PENTA = [0, 2, 4, 7, 9];
-const note = i => 523.25 * Math.pow(2, (PENTA[i % 5] + 12 * Math.floor(i / 5)) / 12);
+function noise({ at = 0, dur = .2, vol = .1, type = 'bandpass', from = 2000, to = 2000, q = 1 } = {}) {
+  const a = audio(); if (!a) return;
+  const t = a.currentTime + at, src = a.createBufferSource(), f = a.createBiquadFilter(), g = a.createGain();
+  src.buffer = noiseBuf; src.playbackRate.value = 1;
+  f.type = type; f.Q.value = q; f.frequency.setValueAtTime(from, t); f.frequency.exponentialRampToValueAtTime(to, t + dur);
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + .004); g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+  src.connect(f); f.connect(g); g.connect(bus); src.start(t, Math.random()); src.stop(t + dur + .05);
+}
+function sparkle(n = 5, { at = 0, spread = .18, vol = .035, lo = 2600, hi = 5200 } = {}) {
+  for (let i = 0; i < n; i++) clink(lo + Math.random() * (hi - lo), { at: at + Math.random() * spread, dur: .18, vol, index: 1.2 });
+}
+const semis = s => Math.pow(2, s / 12);
+// Announcer (device text-to-speech, deep and slow)
+function say(word) {
+  if (soundMode !== 0 || !('speechSynthesis' in window)) return;
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(word);
+    u.lang = 'en-US'; u.pitch = .45; u.rate = .82; u.volume = 1;
+    const vs = speechSynthesis.getVoices().filter(v => /^en/i.test(v.lang));
+    const pick = vs.find(v => /Daniel|Fred|Ralph|Alex|Aaron|Arthur|Male|Google UK English Male/i.test(v.name)) || vs[0];
+    if (pick) u.voice = pick;
+    speechSynthesis.speak(u);
+  } catch (e) {}
+}
 const sfx = {
-  select() { tone(1318.5, { dur: .18, vol: .05, partials: SOFT }); },
-  swap()   { whoosh(0, .18, .045, 900, 2400); },
-  bad()    { tone(392, { dur: .22, vol: .06, partials: SOFT }); tone(349.2, { at: .1, dur: .28, vol: .06, partials: SOFT }); },
+  select() { clink(2093, { dur: .07, vol: .06, index: .8 }); noise({ dur: .03, vol: .04, type: 'highpass', from: 6000, to: 6000 }); },
+  swap()   { noise({ dur: .16, vol: .09, from: 700, to: 3200, q: 1.6 }); sine(500, { dur: .12, vol: .03, to: 900 }); },
+  bad()    { noise({ dur: .14, vol: .07, from: 2400, to: 500, q: 1.6 }); sine(220, { at: .05, dur: .16, vol: .09, to: 150, type: 'triangle' }); },
+  // Match chime: pitch climbs with every cascade step, like the classic combo ladder.
   match(c) {
-    const i = Math.min(c - 1, 9);
-    tone(note(i), { dur: .7, vol: .11 });
-    tone(note(i + 2), { at: .045, dur: .6, vol: .06 });
+    const f = 880 * semis(Math.min(c - 1, 12) * 2);
+    clink(f, { dur: .5, vol: .15 });
+    clink(f * 1.5, { at: .03, dur: .4, vol: .07 });
+    noise({ dur: .05, vol: .05, type: 'highpass', from: 5000, to: 5000 });
+    sparkle(3 + Math.min(c, 5), { at: .02 });
   },
-  special(s) {
-    if (s === 2) [0, 2, 4, 5, 7].forEach((n, k) => tone(note(n + 3), { at: k * .05, dur: .8, vol: .07 }));
-    else { tone(note(5), { dur: .9, vol: .09 }); tone(note(7), { at: .06, dur: .9, vol: .06 }); }
+  // New flame gem: ignition "fwoomp"
+  flameMade() { noise({ dur: .45, vol: .13, type: 'lowpass', from: 300, to: 2500, q: .7 }); sine(160, { dur: .4, vol: .08, to: 320, type: 'triangle' }); sparkle(4, { at: .15 }); },
+  // New star gem: rising electric shimmer
+  starMade() { for (let i = 0; i < 8; i++) clink(1046 * semis(i * 2), { at: i * .035, dur: .35, vol: .06, ratio: 2.01, index: 3 }); sine(110, { dur: .7, vol: .05, type: 'sawtooth', to: 220, attack: .05 }); },
+  // Flame gem explosion: big boom + crackle
+  boom() {
+    sine(150, { dur: .7, vol: .35, to: 38, attack: .002 });
+    noise({ dur: .6, vol: .28, type: 'lowpass', from: 4000, to: 180, q: .5 });
+    for (let i = 0; i < 6; i++) noise({ at: .05 + Math.random() * .3, dur: .04, vol: .08, type: 'highpass', from: 3000, to: 3000 });
   },
-  boom()   { whoosh(0, .55, .16, 1400, 120); tone(130.8, { dur: .6, vol: .14, partials: SOFT, glide: .6 }); },
-  rainbow(){ [0, 1, 2, 3, 4, 5, 6, 7, 8].forEach((n, k) => tone(note(n + 2), { at: k * .045, dur: .7, vol: .06 })); whoosh(0, .7, .07, 600, 4000); },
-  level()  { [0, 2, 4, 5, 7, 10].forEach((n, k) => tone(note(n), { at: k * .09, dur: 1.1, vol: .09 })); }
+  // Star gem activation: electric zap sweep + sparkles
+  rainbow() {
+    const a = audio(); if (!a) return;
+    sine(180, { dur: .9, vol: .08, to: 1800, type: 'sawtooth', attack: .02 });
+    sine(185, { dur: .9, vol: .06, to: 1750, type: 'square', attack: .02 });
+    noise({ dur: .9, vol: .1, from: 400, to: 6000, q: 3 });
+    sparkle(14, { at: .1, spread: .8, vol: .04 });
+  },
+  level() {
+    [0, 4, 7, 12, 16, 19, 24].forEach((s, i) => clink(523 * semis(s), { at: i * .07, dur: .8, vol: .1 }));
+    sparkle(12, { at: .4, spread: .6 });
+  }
 };
+const COMBO_WORDS = { 3: 'Good!', 4: 'Excellent!', 5: 'Awesome!', 6: 'Spectacular!', 7: 'Extraordinary!', 8: 'Unbelievable!' };
 function buzz(ms) { try { navigator.vibrate && navigator.vibrate(ms); } catch (e) {} }
 
 // ---------- Gems ----------
@@ -384,7 +417,7 @@ async function clearCells(set, spawns) {
   for (const [k, sp] of spawns) {
     const [r, c] = rc(k);
     const g = newGem(sp.t, sp.s); g.el.classList.add('born'); setPos(g, r, c, 0); grid[r][c] = g;
-    sfx.special(sp.s);
+    sp.s === 2 ? sfx.starMade() : sfx.flameMade();
   }
 }
 async function gravity() {
@@ -410,7 +443,7 @@ async function resolve(moved, startCombo = 0) {
     const m = findMatches();
     if (!m.cells.size) break;
     combo++;
-    if (combo === 3) banner('Harika!'); else if (combo === 5) banner('Muhteşem!'); else if (combo === 7) banner('İnanılmaz!');
+    if (combo >= 3) { const w = COMBO_WORDS[Math.min(combo, 8)]; banner(w); say(w); }
     await clearCells(m.cells, planSpecials(m, moved));
     await gravity();
     moved = null;
@@ -428,7 +461,7 @@ async function checkLevel() {
   if (score - levelStart >= target()) {
     levelStart += target(); level++;
     banner('Seviye ' + level + '!');
-    sfx.level();
+    sfx.level(); setTimeout(() => say('Level complete!'), 500);
     buzz([30, 40, 30]);
     updateHUD(); await sleep(900);
   }
@@ -488,8 +521,15 @@ function cellFrom(e) {
   return inB(r, c) ? [r, c] : null;
 }
 let start = null, startXY = null, dragged = false;
+let unlocked = false;
+function unlockAudio() {
+  if (unlocked) return; unlocked = true;
+  audio();
+  try { if (soundMode === 0 && 'speechSynthesis' in window) { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } } catch (e) {}
+}
+document.addEventListener('touchend', unlockAudio, { once: false });
 boardEl.addEventListener('pointerdown', e => {
-  e.preventDefault();
+  e.preventDefault(); unlockAudio();
   if (busy) return;
   start = cellFrom(e); startXY = [e.clientX, e.clientY]; dragged = false;
   try { boardEl.setPointerCapture(e.pointerId); } catch (_) {}
@@ -538,8 +578,13 @@ document.getElementById('newBtn').onclick = () => {
   score = 0; level = 1; levelStart = 0; sel = null; updateHUD(); fillBoard(); resetIdle();
 };
 const muteBtn = document.getElementById('muteBtn');
-function renderMute() { muteBtn.textContent = muted ? '🔇 Sessiz' : '🔊 Ses'; }
-muteBtn.onclick = () => { muted = !muted; try { localStorage.setItem('mucevher-mute', muted ? '1' : '0'); } catch (e) {} renderMute(); };
+function renderMute() { muteBtn.textContent = ['🔊 Ses+Spiker', '🔉 Sadece Ses', '🔇 Sessiz'][soundMode]; }
+muteBtn.onclick = () => {
+  soundMode = (soundMode + 1) % 3; muted = soundMode === 2;
+  try { localStorage.setItem('mucevher-sound', soundMode); } catch (e) {}
+  if (soundMode !== 0) try { speechSynthesis.cancel(); } catch (e) {}
+  unlocked = false; unlockAudio(); renderMute(); if (!muted) sfx.select();
+};
 
 // ---------- Offline (PWA) ----------
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
