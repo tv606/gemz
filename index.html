@@ -84,6 +84,7 @@
 </svg>
 
 <h1>GEMZ FOREVER</h1>
+<div id="ver" style="position:absolute;right:10px;top:max(env(safe-area-inset-top),8px);font-size:10px;opacity:.35">v11</div>
 <div class="hud">
   <div class="stat"><small>Score</small><b id="score">0</b></div>
   <div class="stat" style="align-items:center"><small>Level</small><b id="level">1</b></div>
@@ -207,7 +208,7 @@ const note = i => 523.25 * Math.pow(2, (PENTA[i % 5] + 12 * Math.floor(i / 5)) /
 const sfx = {
   select() { tone(1318.5, { dur: .18, vol: .05, partials: SOFT }); },
   swap()   { whoosh(0, .18, .045, 900, 2400); },
-  bad()    { tone(392, { dur: .22, vol: .06, partials: SOFT }); tone(349.2, { at: .1, dur: .28, vol: .06, partials: SOFT }); },
+  bad()    { /* no notes when the gems swap back: only the swap swish is heard */ },
   match(c) {
     const i = Math.min(c - 1, 9);
     tone(note(i), { dur: .7, vol: .11 });
@@ -537,7 +538,11 @@ muteBtn.onclick = () => { muted = !muted; try { localStorage.setItem('mucevher-m
 
 // ---------- Offline (PWA) ----------
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
-  try { navigator.serviceWorker.register('sw.js').catch(() => {}); } catch (e) {}
+  try {
+    navigator.serviceWorker.register('sw.js').then(r => r.update()).catch(() => {});
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (!reloaded) { reloaded = true; location.reload(); } });
+  } catch (e) {}
 }
 
 layout(); renderMute(); updateHUD(); fillBoard(); resetIdle();
