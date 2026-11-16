@@ -13,8 +13,9 @@
 <title>Mücevher Avı</title>
 <style>
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-  html,body{margin:0;height:100%;overflow:hidden;overscroll-behavior:none}
-  body{position:fixed;inset:0;
+  html{background:#0f0a24}
+  html,body{margin:0;overflow:hidden;overscroll-behavior:none}
+  body{position:fixed;top:0;left:0;right:0;height:100vh;height:var(--appH,100dvh);
     background:radial-gradient(ellipse at top,#3b1f6e 0%,#2a1450 35%,#0f0a24 100%);color:#f3eaff;
     font-family:-apple-system,system-ui,"Segoe UI",Roboto,sans-serif;
     user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;touch-action:manipulation;
@@ -28,7 +29,7 @@
   .stat b{font-size:22px;line-height:1.15;font-variant-numeric:tabular-nums}
   .bar{height:9px;border-radius:6px;background:#ffffff18;overflow:hidden;margin:6px 0 8px;flex:none;box-shadow:inset 0 1px 3px #0008}
   .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#ff7ad9,#ffd36e,#7affc6);transition:width .4s ease}
-  #wrap{flex:1;min-height:0;width:100%;display:flex;align-items:center;justify-content:center}
+  #wrap{flex:1;min-height:0;width:100%;overflow:hidden;display:flex;align-items:center;justify-content:center}
   #board{position:relative;border-radius:12px;overflow:hidden;touch-action:none;
     background-color:#1b1036;
     background-image:conic-gradient(#ffffff0d 25%,transparent 0 50%,#ffffff0d 0 75%,transparent 0);
@@ -132,7 +133,18 @@ const rc = k => [Math.floor(k / COLS), k % COLS];
 const inB = (r, c) => r >= 0 && r < ROWS && c >= 0 && c < COLS;
 
 // ---------- Layout: fit the board to the screen ----------
+function fitHeight() {
+  // iOS home-screen apps with a translucent status bar under-report 100%/100vh by the status-bar height.
+  const standalone = window.navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
+  let h = window.innerHeight;
+  if (standalone && /iPhone|iPad|iPod/.test(navigator.userAgent)) {
+    const portrait = window.innerWidth < window.innerHeight;
+    h = Math.max(h, portrait ? Math.max(screen.width, screen.height) : Math.min(screen.width, screen.height));
+  }
+  document.documentElement.style.setProperty('--appH', h + 'px');
+}
 function layout() {
+  fitHeight();
   const w = wrapEl.clientWidth, h = wrapEl.clientHeight;
   const cell = Math.floor(Math.min(w / COLS, h / ROWS));
   boardEl.style.width = cell * COLS + 'px';
@@ -140,23 +152,87 @@ function layout() {
   document.documentElement.style.setProperty('--bw', cell * COLS + 'px');
 }
 window.addEventListener('resize', layout);
+window.addEventListener('pageshow', layout);
+try { new ResizeObserver(() => {
+  const w = wrapEl.clientWidth, h = wrapEl.clientHeight;
+  const cell = Math.floor(Math.min(w / COLS, h / ROWS));
+  if (cell * COLS + 'px' !== boardEl.style.width) { boardEl.style.width = cell * COLS + 'px'; boardEl.style.height = cell * ROWS + 'px';
+    document.documentElement.style.setProperty('--bw', cell * COLS + 'px'); }
+}).observe(wrapEl); } catch (e) {}
 window.addEventListener('orientationchange', () => setTimeout(layout, 200));
 
 // ---------- Sound ----------
-let ac = null;
-function blip(f, d = .08, type = 'sine', vol = .1) {
-  if (muted) return;
+// Soft bell / glass tones: sine partials, gentle attack, low-pass, light echo.
+let ac = null, bus = null;
+function audio() {
+  if (muted) return null;
   try {
-    ac = ac || new (window.AudioContext || window.webkitAudioContext)();
+    if (!ac) {
+      ac = new (window.AudioContext || window.webkitAudioContext)();
+      const master = ac.createGain(); master.gain.value = .55;
+      const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 4200;
+      const comp = ac.createDynamicsCompressor();
+      const delay = ac.createDelay(); delay.delayTime.value = .16;
+      const fb = ac.createGain(); fb.gain.value = .28;
+      const wet = ac.createGain(); wet.gain.value = .22;
+      const dlp = ac.createBiquadFilter(); dlp.type = 'lowpass'; dlp.frequency.value = 2200;
+      master.connect(lp); lp.connect(comp); comp.connect(ac.destination);
+      lp.connect(delay); delay.connect(dlp); dlp.connect(fb); fb.connect(delay); dlp.connect(wet); wet.connect(comp);
+      bus = master;
+    }
     if (ac.state === 'suspended') ac.resume();
-    const o = ac.createOscillator(), g = ac.createGain();
-    o.type = type; o.frequency.setValueAtTime(f, ac.currentTime);
-    o.frequency.exponentialRampToValueAtTime(f * 1.5, ac.currentTime + d);
-    g.gain.setValueAtTime(vol, ac.currentTime);
-    g.gain.exponentialRampToValueAtTime(.001, ac.currentTime + d * 3);
-    o.connect(g).connect(ac.destination); o.start(); o.stop(ac.currentTime + d * 3);
-  } catch (e) {}
+    return ac;
+  } catch (e) { return null; }
 }
+const BELL = [[1, 1], [2, .28], [3, .1], [4.2, .05]];
+const SOFT = [[1, 1], [2, .12]];
+function tone(freq, { at = 0, dur = .5, vol = .12, attack = .008, partials = BELL, glide = 1 } = {}) {
+  const a = audio(); if (!a) return;
+  const t = a.currentTime + at;
+  for (const [mul, amp] of partials) {
+    const o = a.createOscillator(), g = a.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(freq * mul, t);
+    if (glide !== 1) o.frequency.exponentialRampToValueAtTime(freq * mul * glide, t + dur * .6);
+    const d = dur / Math.sqrt(mul);          // higher partials fade faster, like a real bell
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(vol * amp, t + attack);
+    g.gain.exponentialRampToValueAtTime(.0001, t + d);
+    o.connect(g); g.connect(bus); o.start(t); o.stop(t + d + .05);
+  }
+}
+function whoosh(at = 0, dur = .35, vol = .1, from = 1800, to = 300) {
+  const a = audio(); if (!a) return;
+  const t = a.currentTime + at, len = Math.floor(a.sampleRate * dur);
+  const buf = a.createBuffer(1, len, a.sampleRate), ch = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) ch[i] = Math.random() * 2 - 1;
+  const src = a.createBufferSource(); src.buffer = buf;
+  const f = a.createBiquadFilter(); f.type = 'bandpass'; f.Q.value = 1.2;
+  f.frequency.setValueAtTime(from, t); f.frequency.exponentialRampToValueAtTime(to, t + dur);
+  const g = a.createGain();
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + dur * .25); g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+  src.connect(f); f.connect(g); g.connect(bus); src.start(t); src.stop(t + dur);
+}
+// Major pentatonic, so any sequence of match notes sounds pleasant.
+const PENTA = [0, 2, 4, 7, 9];
+const note = i => 523.25 * Math.pow(2, (PENTA[i % 5] + 12 * Math.floor(i / 5)) / 12);
+const sfx = {
+  select() { tone(1318.5, { dur: .18, vol: .05, partials: SOFT }); },
+  swap()   { whoosh(0, .18, .045, 900, 2400); },
+  bad()    { tone(392, { dur: .22, vol: .06, partials: SOFT }); tone(349.2, { at: .1, dur: .28, vol: .06, partials: SOFT }); },
+  match(c) {
+    const i = Math.min(c - 1, 9);
+    tone(note(i), { dur: .7, vol: .11 });
+    tone(note(i + 2), { at: .045, dur: .6, vol: .06 });
+  },
+  special(s) {
+    if (s === 2) [0, 2, 4, 5, 7].forEach((n, k) => tone(note(n + 3), { at: k * .05, dur: .8, vol: .07 }));
+    else { tone(note(5), { dur: .9, vol: .09 }); tone(note(7), { at: .06, dur: .9, vol: .06 }); }
+  },
+  boom()   { whoosh(0, .55, .16, 1400, 120); tone(130.8, { dur: .6, vol: .14, partials: SOFT, glide: .6 }); },
+  rainbow(){ [0, 1, 2, 3, 4, 5, 6, 7, 8].forEach((n, k) => tone(note(n + 2), { at: k * .045, dur: .7, vol: .06 })); whoosh(0, .7, .07, 600, 4000); },
+  level()  { [0, 2, 4, 5, 7, 10].forEach((n, k) => tone(note(n), { at: k * .09, dur: 1.1, vol: .09 })); }
+};
 function buzz(ms) { try { navigator.vibrate && navigator.vibrate(ms); } catch (e) {} }
 
 // ---------- Gems ----------
@@ -294,11 +370,11 @@ async function clearCells(set, spawns) {
     b.style.left = ((c - 1) / COLS * 100) + '%'; b.style.top = ((r - 1) / ROWS * 100) + '%';
     boardEl.appendChild(b); setTimeout(() => b.remove(), 420);
   }
-  if (blasts.length) { boardEl.classList.remove('shake'); void boardEl.offsetWidth; boardEl.classList.add('shake'); blip(90, .2, 'sawtooth', .12); buzz(40); }
+  if (blasts.length) { boardEl.classList.remove('shake'); void boardEl.offsetWidth; boardEl.classList.add('shake'); sfx.boom(); buzz(40); }
   const pts = toClear.size * 10 * combo + blasts.length * 50 + (toClear.size >= 10 ? 100 : 0);
   score += pts;
   floatText('+' + pts + (combo > 1 ? `  x${combo}` : ''), sr / toClear.size, sc / toClear.size);
-  blip(440 * Math.pow(1.12, Math.min(combo, 10)), .07, 'triangle');
+  if (!blasts.length) sfx.match(combo);
   updateHUD();
   await sleep(blasts.length ? 300 : 220);
   for (const k of toClear) {
@@ -308,7 +384,7 @@ async function clearCells(set, spawns) {
   for (const [k, sp] of spawns) {
     const [r, c] = rc(k);
     const g = newGem(sp.t, sp.s); g.el.classList.add('born'); setPos(g, r, c, 0); grid[r][c] = g;
-    blip(sp.s === 2 ? 1200 : 900, .1, 'sine', .08);
+    sfx.special(sp.s);
   }
 }
 async function gravity() {
@@ -352,7 +428,7 @@ async function checkLevel() {
   if (score - levelStart >= target()) {
     levelStart += target(); level++;
     banner('Seviye ' + level + '!');
-    [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => blip(f, .12, 'triangle', .1), i * 110));
+    sfx.level();
     buzz([30, 40, 30]);
     updateHUD(); await sleep(900);
   }
@@ -375,7 +451,7 @@ async function animSwap(a, b) {
 async function trySwap(a, b) {
   if (busy) return;
   busy = true; clearSel(); clearHint();
-  blip(330, .05);
+  sfx.swap();
   await animSwap(a, b);
   const ga = grid[a[0]][a[1]], gb = grid[b[0]][b[1]];
   if (ga.s === 2 || gb.s === 2) {
@@ -389,7 +465,7 @@ async function trySwap(a, b) {
       grid[sp[0]][sp[1]].fired = true;
       for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (grid[r][c].t === og.t) set.add(key(r, c));
     }
-    banner('Gökkuşağı!'); buzz(60);
+    banner('Gökkuşağı!'); buzz(60); sfx.rainbow();
     combo = 1;
     await clearCells(set, new Map());
     await gravity();
@@ -397,7 +473,7 @@ async function trySwap(a, b) {
   } else if (findMatches().cells.size) {
     await resolve([a, b]);
   } else {
-    blip(160, .08, 'square', .05);
+    sfx.bad();
     await animSwap(a, b);
   }
   busy = false;
@@ -438,7 +514,7 @@ boardEl.addEventListener('pointerup', () => {
     const same = sel[0] === p[0] && sel[1] === p[1];
     clearSel(); if (same) return;
   }
-  sel = p; grid[p[0]][p[1]].el.classList.add('sel'); blip(600, .03, 'sine', .05);
+  sel = p; grid[p[0]][p[1]].el.classList.add('sel'); sfx.select();
 });
 boardEl.addEventListener('pointercancel', () => { start = null; });
 document.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
